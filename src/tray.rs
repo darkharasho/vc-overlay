@@ -99,6 +99,17 @@ impl ksni::Tray for Tray {
             SubMenu { label: "Monitor".into(), submenu: self.monitor_items(cfg.output.as_deref()), ..Default::default() }
                 .into(),
             MenuItem::Separator,
+            CheckmarkItem {
+                label: "Start at login".into(),
+                checked: crate::autostart::is_enabled(),
+                activate: Box::new(|_: &mut Self| {
+                    if let Err(e) = crate::autostart::set(!crate::autostart::is_enabled()) {
+                        eprintln!("vc-overlay: couldn't change autostart: {e}");
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
             StandardItem {
                 label: "Reconnect to Discord (re-authorize)".into(),
                 activate: Box::new(|t: &mut Self| t.shared.reauth.store(true, Ordering::Relaxed)),

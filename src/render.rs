@@ -6,7 +6,7 @@ use crate::state::{Member, Status, Voice};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tiny_skia::{
-    Color, FillRule, FilterQuality, IntSize, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Stroke,
+    Color, FillRule, FilterQuality, IntSize, LineCap, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Stroke,
     Transform,
 };
 
@@ -14,6 +14,7 @@ const FONT: &[u8] = include_bytes!("../assets/OpenSans-Semibold.ttf");
 
 const SPEAKING: [u8; 4] = [35, 165, 90, 255];
 const MUTED: [u8; 4] = [242, 63, 67, 255];
+const BADGE_BG: [u8; 4] = [30, 31, 34, 255];
 const ACCENT: [u8; 4] = [88, 101, 242, 255];
 const PILL: [u8; 4] = [17, 18, 20, 200];
 const PILL_SPEAKING: [u8; 4] = [20, 22, 24, 235];
@@ -208,22 +209,15 @@ impl Painter {
         }
 
         if m.muted || m.deafened {
-            let br = (size * 0.2).max(5.0);
-            let (bx, by) = (x + size - br * 0.6, y + size - br * 0.6);
+            // Discord-style status badge: a dark disc on the bottom-right with a red
+            // crossed-out mic (muted) or headphones (deafened, which implies muted).
+            let br = (size * 0.31).max(8.0);
+            let (bx, by) = (x + size - br * 0.7, y + size - br * 0.7);
             if let Some(dot) = PathBuilder::from_circle(bx, by, br) {
-                pm.fill_path(&dot, &paint(MUTED), FillRule::Winding, ts, None);
+                pm.fill_path(&dot, &paint(BADGE_BG), FillRule::Winding, ts, None);
             }
-            let d = br * 0.5;
-            let mut pb = PathBuilder::new();
-            pb.move_to(bx - d, by - d);
-            pb.line_to(bx + d, by + d);
-            if m.deafened {
-                pb.move_to(bx - d, by + d);
-                pb.line_to(bx + d, by - d);
-            }
-            if let Some(p) = pb.finish() {
-                pm.stroke_path(&p, &paint([255; 4]), &Stroke { width: 1.6, ..Default::default() }, ts, None);
-            }
+            let icon = if m.deafened { Icon::Deafened } else { Icon::Muted };
+            draw_icon(pm, ts, icon, bx, by, br * 1.5, MUTED);
         }
     }
 
@@ -290,6 +284,62 @@ impl Painter {
             blend_mask(pm, gx, gy, m.width, m.height, &bitmap, color);
             pen += m.advance_width;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Icon {
+    Muted,
+    Deafened,
+}
+
+/// Draws a status icon `s` logical pixels wide centered on (cx, cy). Paths use a 24-unit
+/// box like Discord's own SVG icons.
+fn draw_icon(pm: &mut Pixmap, ts: Transform, icon: Icon, cx: f32, cy: f32, s: f32, color: [u8; 4]) {
+    let ts = ts.pre_translate(cx - s / 2.0, cy - s / 2.0).pre_scale(s / 24.0, s / 24.0);
+    let stroke = |w: f32| Stroke { width: w, line_cap: LineCap::Round, ..Default::default() };
+    let fill = paint(color);
+
+    match icon {
+        Icon::Muted => {
+            if let Some(body) = rounded_rect(8.5, 2.0, 7.0, 12.0, 3.5) {
+                pm.fill_path(&body, &fill, FillRule::Winding, ts, None);
+            }
+            let mut pb = PathBuilder::new();
+            pb.move_to(5.0, 11.0);
+            pb.cubic_to(5.0, 15.5, 8.5, 18.0, 12.0, 18.0);
+            pb.cubic_to(15.5, 18.0, 19.0, 15.5, 19.0, 11.0);
+            pb.move_to(12.0, 18.0);
+            pb.line_to(12.0, 21.5);
+            if let Some(p) = pb.finish() {
+                pm.stroke_path(&p, &fill, &stroke(2.2), ts, None);
+            }
+        }
+        Icon::Deafened => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(4.0, 15.0);
+            pb.line_to(4.0, 12.0);
+            pb.cubic_to(4.0, 7.6, 7.6, 4.0, 12.0, 4.0);
+            pb.cubic_to(16.4, 4.0, 20.0, 7.6, 20.0, 12.0);
+            pb.line_to(20.0, 15.0);
+            if let Some(p) = pb.finish() {
+                pm.stroke_path(&p, &fill, &stroke(2.4), ts, None);
+            }
+            for x in [2.5, 15.5] {
+                if let Some(cup) = rounded_rect(x, 12.5, 6.0, 9.0, 2.2) {
+                    pm.fill_path(&cup, &fill, FillRule::Winding, ts, None);
+                }
+            }
+        }
+    }
+
+    // The slash, with a cut-out in the badge colour so it reads at small sizes.
+    let mut pb = PathBuilder::new();
+    pb.move_to(3.5, 3.5);
+    pb.line_to(20.5, 20.5);
+    if let Some(p) = pb.finish() {
+        pm.stroke_path(&p, &paint(BADGE_BG), &stroke(4.2), ts, None);
+        pm.stroke_path(&p, &fill, &stroke(2.0), ts, None);
     }
 }
 
