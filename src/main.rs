@@ -1,4 +1,4 @@
-mod autostart;
+mod desktop;
 mod config;
 mod overlay;
 mod render;
@@ -35,6 +35,7 @@ fn main() {
 
     let tray = tray::spawn(shared.clone());
     if let Some(exe) = exe.clone() {
+        desktop::register_launcher(&exe);
         update::spawn(shared.clone(), exe);
     }
     let worker = shared.clone();

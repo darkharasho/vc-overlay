@@ -101,9 +101,9 @@ impl ksni::Tray for Tray {
             MenuItem::Separator,
             CheckmarkItem {
                 label: "Start at login".into(),
-                checked: crate::autostart::is_enabled(),
+                checked: crate::desktop::autostart_enabled(),
                 activate: Box::new(|_: &mut Self| {
-                    if let Err(e) = crate::autostart::set(!crate::autostart::is_enabled()) {
+                    if let Err(e) = crate::desktop::set_autostart(!crate::desktop::autostart_enabled()) {
                         eprintln!("vc-overlay: couldn't change autostart: {e}");
                     }
                 }),

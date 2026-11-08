@@ -36,13 +36,21 @@ chmod +x ~/.local/bin/vc-overlay
 1. With Discord open, click **Authorize** when Discord asks.
 2. Right-click the tray icon and tick **Start at login**.
 
-That's it: it starts with your session and updates itself (see [Updates](#updates)).
+That's it: it starts with your session and updates itself (see [Updates](#updates)). The
+first run also adds **VC Overlay** to your app launcher, so after that you can start it
+from the menu instead of a terminal.
+
 Each release also has a tarball with the binary, README and license, plus SHA-256
 checksums, on the [releases page](https://github.com/darkharasho/vc-overlay/releases).
 
-To uninstall, untick **Start at login** (or delete
-`~/.config/autostart/vc-overlay.desktop`), quit from the tray, and remove
-`~/.local/bin/vc-overlay` and `~/.config/vc-overlay/`.
+To uninstall, quit from the tray and delete:
+
+```sh
+rm -rf ~/.local/bin/vc-overlay ~/.config/vc-overlay \
+  ~/.config/autostart/vc-overlay.desktop \
+  ~/.local/share/applications/vc-overlay.desktop \
+  ~/.local/share/icons/hicolor/64x64/apps/vc-overlay.png
+```
 
 ## Using it
 
