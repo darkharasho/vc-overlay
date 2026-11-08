@@ -34,8 +34,11 @@ jobs:
           cp target/release/vc-overlay README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          # Bare binary + checksum for the in-app updater.
+          cp target/release/vc-overlay vc-overlay-x86_64-linux
+          sha256sum vc-overlay-x86_64-linux > vc-overlay-x86_64-linux.sha256
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" vc-overlay-*.tar.gz* --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" vc-overlay-v*.tar.gz* vc-overlay-x86_64-linux* --title "$GITHUB_REF_NAME" --generate-notes

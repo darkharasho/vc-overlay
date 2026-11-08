@@ -40,7 +40,7 @@ cargo build --release
   through to the game.
 - **Right-click the tray icon** for settings: only show who's talking, show names, show
   channel name, screen edge, max people (extras collapse into "+N", talkers kept
-  visible), avatar size, monitor, start at login, re-authorize, quit.
+  visible), avatar size, monitor, start at login, updates, re-authorize, quit.
 
 Settings live in `~/.config/vc-overlay/config.json`; `gap` (distance from the edge) is
 only editable there.
@@ -54,6 +54,14 @@ binary.
 ```sh
 install -Dm755 target/release/vc-overlay ~/.local/bin/vc-overlay
 ```
+
+## Updates
+
+Releases come from GitHub. Every 6 hours vc-overlay checks for a newer release,
+downloads it, verifies its SHA-256 and replaces its own binary. If you're not in a voice
+channel it restarts straight away; otherwise the tray shows *Restart to update*. Turn this
+off with *Install updates automatically* in the tray menu. Builds run from `target/`
+never update themselves.
 
 ## Notes
 

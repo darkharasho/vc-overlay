@@ -22,6 +22,17 @@ pub struct Member {
     pub speaking: bool,
 }
 
+/// Progress of the self-updater, shown in the tray.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    /// This version is installed and runs after a restart.
+    Ready(String),
+    Failed(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct Voice {
     pub status: Status,
@@ -44,6 +55,11 @@ pub struct Shared {
     /// Set by the tray to drop the saved token and log in again.
     pub reauth: AtomicBool,
     pub quit: AtomicBool,
+    /// Re-exec the (updated) binary after quitting.
+    pub restart: AtomicBool,
+    /// Set by the tray's "Check for updates".
+    pub check_update: AtomicBool,
+    update: Mutex<UpdateState>,
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// Monitors the overlay can be placed on: (connector name, description).
     pub outputs: Mutex<Vec<(String, String)>>,
@@ -57,6 +73,9 @@ impl Shared {
             editing: AtomicBool::new(false),
             reauth: AtomicBool::new(false),
             quit: AtomicBool::new(false),
+            restart: AtomicBool::new(false),
+            check_update: AtomicBool::new(false),
+            update: Mutex::new(UpdateState::Idle),
             waker: OnceLock::new(),
             outputs: Mutex::new(Vec::new()),
         }
@@ -96,6 +115,15 @@ impl Shared {
             c.clone()
         };
         snapshot.save();
+        self.repaint();
+    }
+
+    pub fn update_state(&self) -> UpdateState {
+        self.update.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set_update_state(&self, s: UpdateState) {
+        *self.update.lock().unwrap_or_else(|e| e.into_inner()) = s;
         self.repaint();
     }
 

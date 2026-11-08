@@ -1,5 +1,5 @@
 use crate::config::{Config, Edge};
-use crate::state::{Shared, Status};
+use crate::state::{Shared, Status, UpdateState};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
 use ksni::{Icon, MenuItem};
@@ -110,6 +110,14 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
+            CheckmarkItem {
+                label: "Install updates automatically".into(),
+                checked: cfg.auto_update,
+                activate: Box::new(|t: &mut Self| t.shared.update_config(|c| c.auto_update = !c.auto_update)),
+                ..Default::default()
+            }
+            .into(),
+            self.update_item(),
             StandardItem {
                 label: "Reconnect to Discord (re-authorize)".into(),
                 activate: Box::new(|t: &mut Self| t.shared.reauth.store(true, Ordering::Relaxed)),
@@ -131,6 +139,32 @@ impl ksni::Tray for Tray {
 }
 
 impl Tray {
+    fn update_item(&self) -> MenuItem<Self> {
+        let state = self.shared.update_state();
+        let label = match &state {
+            UpdateState::Idle => format!("Check for updates (v{})", env!("CARGO_PKG_VERSION")),
+            UpdateState::Checking => "Checking for updates…".into(),
+            UpdateState::UpToDate => format!("Up to date (v{}) · check again", env!("CARGO_PKG_VERSION")),
+            UpdateState::Ready(v) => format!("Restart to update to v{v}"),
+            UpdateState::Failed(_) => "Update failed · try again".into(),
+        };
+        StandardItem {
+            label,
+            enabled: state != UpdateState::Checking,
+            activate: Box::new(|t: &mut Self| {
+                if matches!(t.shared.update_state(), UpdateState::Ready(_)) {
+                    t.shared.restart.store(true, Ordering::Relaxed);
+                    t.shared.quit.store(true, Ordering::Relaxed);
+                    t.shared.repaint();
+                } else {
+                    t.shared.check_update.store(true, Ordering::Relaxed);
+                }
+            }),
+            ..Default::default()
+        }
+        .into()
+    }
+
     fn monitor_items(&self, current: Option<&str>) -> Vec<MenuItem<Self>> {
         let outputs = self.shared.outputs.lock().map(|o| o.clone()).unwrap_or_default();
         let mut items: Vec<MenuItem<Self>> = vec![

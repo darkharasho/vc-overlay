@@ -79,7 +79,7 @@ struct App {
 
     pointer: Option<wl_pointer::WlPointer>,
     drag: Option<Drag>,
-    tray_snapshot: (Status, Option<String>, bool, usize),
+    tray_snapshot: (Status, Option<String>, bool, usize, crate::state::UpdateState),
     signal: LoopSignal,
 }
 
@@ -137,7 +137,7 @@ pub fn run(shared: Arc<Shared>, tray: Option<ksni::blocking::Handle<Tray>>) -> R
         editing: shared.is_editing(),
         pointer: None,
         drag: None,
-        tray_snapshot: (Status::NoDiscord, None, false, usize::MAX),
+        tray_snapshot: (Status::NoDiscord, None, false, usize::MAX, crate::state::UpdateState::Idle),
         signal: event_loop.get_signal(),
         shared,
     };
@@ -303,7 +303,7 @@ impl App {
         let snap = {
             let v = self.shared.voice();
             let outputs = self.shared.outputs.lock().map(|o| o.len()).unwrap_or(0);
-            (v.status.clone(), v.channel_name.clone(), self.editing, outputs)
+            (v.status.clone(), v.channel_name.clone(), self.editing, outputs, self.shared.update_state())
         };
         if snap != self.tray_snapshot {
             self.tray_snapshot = snap;

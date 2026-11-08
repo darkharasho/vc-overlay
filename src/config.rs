@@ -48,6 +48,8 @@ pub struct Config {
     pub max_entries: u32,
     /// Avatar diameter in logical pixels.
     pub avatar_size: f32,
+    /// Download and install new releases from GitHub.
+    pub auto_update: bool,
     /// StreamKit access token for the local Discord RPC. Kept out of logs.
     pub token: Option<String>,
 }
@@ -64,6 +66,7 @@ impl Default for Config {
             show_channel: false,
             max_entries: 8,
             avatar_size: 32.0,
+            auto_update: true,
             token: None,
         }
     }

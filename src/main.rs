@@ -5,6 +5,7 @@ mod render;
 mod rpc;
 mod state;
 mod tray;
+mod update;
 
 use state::{Member, Shared, Status};
 use std::sync::Arc;
@@ -29,7 +30,13 @@ fn main() {
         shared.editing.store(true, Ordering::Relaxed);
     }
 
+    // Resolve before an update renames a new binary over this one.
+    let exe = std::env::current_exe().ok();
+
     let tray = tray::spawn(shared.clone());
+    if let Some(exe) = exe.clone() {
+        update::spawn(shared.clone(), exe);
+    }
     let worker = shared.clone();
     if demo {
         std::thread::spawn(move || run_demo(worker));
@@ -44,6 +51,14 @@ fn main() {
     shared.quit.store(true, Ordering::Relaxed);
     let final_cfg = shared.config().clone();
     final_cfg.save();
+
+    if shared.restart.load(Ordering::Relaxed) {
+        if let Some(exe) = exe {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(exe).args(&args).exec();
+            eprintln!("vc-overlay: restart failed: {err}");
+        }
+    }
 }
 
 /// Fake channel with people randomly talking, for trying the overlay without Discord.
