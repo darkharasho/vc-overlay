@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=VC Overlay
+Comment=Discord voice overlay
+Exec=vc-overlay
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;
+X-KDE-autostart-after=panel
