@@ -1,3 +1,4 @@
+use crate::config::{Config, Edge};
 use crate::state::{Shared, Status};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
@@ -49,7 +50,7 @@ impl ksni::Tray for Tray {
             StandardItem { label: status_label, enabled: false, ..Default::default() }.into(),
             MenuItem::Separator,
             StandardItem {
-                label: if editing { "Lock position".into() } else { "Move / resize overlay".into() },
+                label: if editing { "Lock position".into() } else { "Move overlay".into() },
                 activate: Box::new(|t: &mut Self| toggle_edit(&t.shared)),
                 ..Default::default()
             }
@@ -68,18 +69,33 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
-            StandardItem {
-                label: "Bigger avatars".into(),
-                activate: Box::new(|t: &mut Self| t.shared.update_config(|c| c.avatar_size = (c.avatar_size + 4.0).min(64.0))),
+            CheckmarkItem {
+                label: "Show channel name".into(),
+                checked: cfg.show_channel,
+                activate: Box::new(|t: &mut Self| t.shared.update_config(|c| c.show_channel = !c.show_channel)),
                 ..Default::default()
             }
             .into(),
-            StandardItem {
-                label: "Smaller avatars".into(),
-                activate: Box::new(|t: &mut Self| t.shared.update_config(|c| c.avatar_size = (c.avatar_size - 4.0).max(20.0))),
-                ..Default::default()
-            }
-            .into(),
+            choice(
+                "Screen edge",
+                &Edge::ALL.map(|e| (e.label(), e)),
+                cfg.edge,
+                |c, e| {
+                    c.edge = e;
+                },
+            ),
+            choice(
+                "Max people",
+                &[("3", 3), ("5", 5), ("8", 8), ("12", 12), ("20", 20), ("No limit", 0)],
+                cfg.max_entries,
+                |c, n| c.max_entries = n,
+            ),
+            choice(
+                "Avatar size",
+                &[("Small", 24), ("Medium", 32), ("Large", 40), ("Huge", 52)],
+                cfg.avatar_size.round() as u32,
+                |c, n| c.avatar_size = n as f32,
+            ),
             SubMenu { label: "Monitor".into(), submenu: self.monitor_items(cfg.output.as_deref()), ..Default::default() }
                 .into(),
             MenuItem::Separator,
@@ -132,6 +148,28 @@ impl Tray {
         }
         items
     }
+}
+
+/// A submenu of mutually exclusive options.
+fn choice<V: Copy + PartialEq + Send + Sync + 'static>(
+    label: &str,
+    options: &[(&str, V)],
+    current: V,
+    set: fn(&mut Config, V),
+) -> MenuItem<Tray> {
+    let submenu = options
+        .iter()
+        .map(|&(name, value)| {
+            CheckmarkItem {
+                label: name.into(),
+                checked: value == current,
+                activate: Box::new(move |t: &mut Tray| t.shared.update_config(|c| set(c, value))),
+                ..Default::default()
+            }
+            .into()
+        })
+        .collect();
+    SubMenu { label: label.into(), submenu, ..Default::default() }.into()
 }
 
 fn toggle_edit(shared: &Shared) {

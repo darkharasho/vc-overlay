@@ -1,8 +1,11 @@
 # vc-overlay
 
 A tiny always-on-top Discord voice overlay for Linux Wayland: avatars of everyone in your
-voice channel, a green ring on whoever is talking, red badges for muted/deafened. Pick a
-spot on screen once and it stays there, click-through, above fullscreen games.
+voice channel, a green ring on whoever is talking, red badges for muted/deafened. It sits
+on a screen edge, click-through, above fullscreen games.
+
+- **Left edge:** avatar, then name. **Right edge:** name, then avatar, flush right.
+- **Top / bottom edge:** one horizontal bar.
 
 - **Native Rust, no webview, no GPU.** Software-rendered into a Wayland layer-shell
   surface; about 16 MB of RAM.
@@ -30,11 +33,16 @@ cargo build --release
 
 ## Using it
 
-- **Left-click the tray icon** (or *Move / resize overlay* in its menu) to unlock. Drag
-  anywhere to move, drag the bottom-right grip to resize, click **Done** to lock. While
-  locked, clicks go straight through to the game.
-- **Right-click the tray icon** for options: only show who's talking, show names,
-  avatar size, which monitor, re-authorize, quit.
+- **Left-click the tray icon** (or *Move overlay* in its menu) to unlock. Drag it
+  anywhere; on release it snaps to the nearest screen edge and remembers how far along
+  that edge it was. Click it without dragging to lock. While locked, clicks go straight
+  through to the game.
+- **Right-click the tray icon** for settings: only show who's talking, show names, show
+  channel name, screen edge, max people (extras collapse into "+N", talkers kept
+  visible), avatar size, monitor, re-authorize, quit.
+
+Settings live in `~/.config/vc-overlay/config.json`; `gap` (distance from the edge) is
+only editable there.
 
 ### Start with your session
 

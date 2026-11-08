@@ -2,7 +2,8 @@
 //! (and other wlroots-style compositors) draw above fullscreen games.
 //! Click-through when locked (empty input region); draggable in edit mode.
 
-use crate::render::{Hits, Painter, contains};
+use crate::config::Edge;
+use crate::render::Painter;
 use crate::state::{Shared, Status};
 use crate::tray::Tray;
 use smithay_client_toolkit::{
@@ -37,12 +38,15 @@ use std::sync::atomic::Ordering;
 use tiny_skia::Pixmap;
 
 const BTN_LEFT: u32 = 0x110;
-const MIN_W: u32 = 140;
-const MIN_H: u32 = 100;
+/// Pointer travel (px) before a press counts as a drag rather than a click.
+const DRAG_THRESHOLD: f64 = 4.0;
 
-enum Drag {
-    Move { press: (f64, f64) },
-    Resize { press: (f64, f64), start: (u32, u32) },
+struct Drag {
+    /// Surface-local pointer position at press.
+    press: (f64, f64),
+    /// Surface top-left on the output while dragging.
+    pos: (i32, i32),
+    moved: bool,
 }
 
 struct App {
@@ -57,7 +61,6 @@ struct App {
     shared: Arc<Shared>,
     tray: Option<ksni::blocking::Handle<Tray>>,
     painter: Painter,
-    hits: Hits,
 
     layer: Option<LayerSurface>,
     /// Output name the current surface was created for.
@@ -65,6 +68,10 @@ struct App {
     configured: bool,
     width: u32,
     height: u32,
+    /// Last size asked of the compositor.
+    requested: (u32, u32),
+    /// Logical size of the output the surface is on.
+    output_size: Option<(i32, i32)>,
     scale: i32,
     frame_pending: bool,
     dirty: bool,
@@ -107,7 +114,6 @@ pub fn run(shared: Arc<Shared>, tray: Option<ksni::blocking::Handle<Tray>>) -> R
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm: {e}"))?;
     let pool = SlotPool::new(256 * 512 * 4, &shm).map_err(|e| e.to_string())?;
 
-    let cfg = shared.config().clone();
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -117,13 +123,14 @@ pub fn run(shared: Arc<Shared>, tray: Option<ksni::blocking::Handle<Tray>>) -> R
         shm,
         pool,
         painter: Painter::new(wake),
-        hits: Hits::default(),
         tray,
         layer: None,
         layer_output: None,
         configured: false,
-        width: cfg.width.max(MIN_W),
-        height: cfg.height.max(MIN_H),
+        width: 1,
+        height: 1,
+        requested: (0, 0),
+        output_size: None,
         scale: 1,
         frame_pending: false,
         dirty: false,
@@ -157,15 +164,81 @@ impl App {
         });
         self.layer_output = cfg.output.clone();
 
+        self.output_size = output
+            .as_ref()
+            .and_then(|o| self.output_state.info(o))
+            .and_then(|i| i.logical_size);
+
         let surface = self.compositor.create_surface(qh);
         let layer = self.layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("vc-overlay"), output.as_ref());
-        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_size(self.width, self.height);
-        layer.set_margin(cfg.y.max(0), 0, 0, cfg.x.max(0));
+        let voice = self.shared.voice().clone();
+        let (w, h) = self.painter.measure(&voice, &cfg, self.editing);
+        layer.set_size(w, h);
+        self.requested = (w, h);
         self.layer = Some(layer);
+        self.apply_anchor();
         self.apply_input_region();
+        if let Some(l) = &self.layer {
+            l.commit();
+        }
+    }
+
+    /// Attach to the configured screen edge.
+    fn apply_anchor(&self) {
+        let Some(layer) = &self.layer else { return };
+        let c = self.shared.config();
+        let (off, gap) = (c.offset.max(0), c.gap.max(0));
+        match c.edge {
+            Edge::Left => {
+                layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+                layer.set_margin(off, 0, 0, gap);
+            }
+            Edge::Right => {
+                layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
+                layer.set_margin(off, gap, 0, 0);
+            }
+            Edge::Top => {
+                layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+                layer.set_margin(gap, 0, 0, off);
+            }
+            Edge::Bottom => {
+                layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
+                layer.set_margin(0, 0, gap, off);
+            }
+        }
+    }
+
+    fn output_size(&self) -> (i32, i32) {
+        self.output_size.unwrap_or((1920, 1080))
+    }
+
+    /// Current top-left of the surface in output coordinates.
+    fn top_left(&self) -> (i32, i32) {
+        let (ow, oh) = self.output_size();
+        let (w, h) = (self.width as i32, self.height as i32);
+        let c = self.shared.config();
+        match c.edge {
+            Edge::Left => (c.gap, c.offset),
+            Edge::Right => (ow - c.gap - w, c.offset),
+            Edge::Top => (c.offset, c.gap),
+            Edge::Bottom => (c.offset, oh - c.gap - h),
+        }
+    }
+
+    /// After a drag, stick to whichever edge is closest.
+    fn snap(&mut self, (x, y): (i32, i32)) {
+        let (ow, oh) = self.output_size();
+        let (w, h) = (self.width as i32, self.height as i32);
+        let dist = [(Edge::Left, x), (Edge::Right, ow - (x + w)), (Edge::Top, y), (Edge::Bottom, oh - (y + h))];
+        let edge = dist.iter().min_by_key(|(_, d)| *d).map(|(e, _)| *e).unwrap_or(Edge::Left);
+        let offset = if edge.is_horizontal() { x.clamp(0, (ow - w).max(0)) } else { y.clamp(0, (oh - h).max(0)) };
+        self.shared.update_config(|c| {
+            c.edge = edge;
+            c.offset = offset;
+        });
+        self.apply_anchor();
         if let Some(l) = &self.layer {
             l.commit();
         }
@@ -213,9 +286,13 @@ impl App {
             self.editing = editing;
             self.drag = None;
             self.apply_input_region();
-            if let Some(l) = &self.layer {
-                l.commit();
-            }
+        }
+        // Edge/offset may have changed from the tray.
+        if self.drag.is_none() {
+            self.apply_anchor();
+        }
+        if let Some(l) = &self.layer {
+            l.commit();
         }
 
         self.sync_tray();
@@ -249,13 +326,22 @@ impl App {
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         let Some(layer) = &self.layer else { return };
+        let voice = self.shared.voice().clone();
+        let cfg = self.shared.config().clone();
+
+        // Size the surface to its content; draw once the compositor confirms the size.
+        let want = self.painter.measure(&voice, &cfg, self.editing);
+        if want != (self.width, self.height) && want != self.requested {
+            layer.set_size(want.0, want.1);
+            layer.commit();
+            self.requested = want;
+            return;
+        }
+
         let scale = self.scale.max(1);
         let (w, h) = (self.width * scale as u32, self.height * scale as u32);
         let Some(mut pm) = Pixmap::new(w, h) else { return };
-
-        let voice = self.shared.voice().clone();
-        let cfg = self.shared.config().clone();
-        self.hits = self.painter.draw(&mut pm, scale as f32, &voice, &cfg, self.editing);
+        self.painter.draw(&mut pm, scale as f32, &voice, &cfg, self.editing);
 
         let Ok((buffer, canvas)) =
             self.pool.create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
@@ -285,54 +371,37 @@ impl App {
         let (px, py) = ev.position;
         match ev.kind {
             PointerEventKind::Press { button: BTN_LEFT, .. } => {
-                if contains(self.hits.done, px as f32, py as f32) {
-                    self.shared.editing.store(false, Ordering::Relaxed);
-                    self.shared.repaint();
-                } else if contains(self.hits.grip, px as f32, py as f32) {
-                    self.drag = Some(Drag::Resize { press: (px, py), start: (self.width, self.height) });
-                } else {
-                    self.drag = Some(Drag::Move { press: (px, py) });
+                self.drag = Some(Drag { press: (px, py), pos: self.top_left(), moved: false });
+            }
+            PointerEventKind::Motion { .. } => {
+                let Some(drag) = &mut self.drag else { return };
+                let (dx, dy) = (px - drag.press.0, py - drag.press.1);
+                if !drag.moved && dx.hypot(dy) < DRAG_THRESHOLD {
+                    return;
+                }
+                let first = !drag.moved;
+                drag.moved = true;
+                drag.pos.0 += dx.round() as i32;
+                drag.pos.1 += dy.round() as i32;
+                let (x, y) = drag.pos;
+                if let Some(l) = &self.layer {
+                    // Float freely while dragging; snap to an edge on release.
+                    if first {
+                        l.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    }
+                    l.set_margin(y, 0, 0, x);
+                    l.commit();
                 }
             }
-            PointerEventKind::Motion { .. } => match self.drag {
-                Some(Drag::Move { press }) => {
-                    let (dx, dy) = ((px - press.0).round() as i32, (py - press.1).round() as i32);
-                    if dx == 0 && dy == 0 {
-                        return;
-                    }
-                    let (x, y) = {
-                        let mut c = self.shared.config();
-                        c.x = (c.x + dx).max(0);
-                        c.y = (c.y + dy).max(0);
-                        (c.x, c.y)
-                    };
-                    if let Some(l) = &self.layer {
-                        l.set_margin(y, 0, 0, x);
-                        l.commit();
-                    }
-                }
-                Some(Drag::Resize { press, start }) => {
-                    let w = (start.0 as f64 + px - press.0).max(MIN_W as f64) as u32;
-                    let h = (start.1 as f64 + py - press.1).max(MIN_H as f64) as u32;
-                    if (w, h) != (self.width, self.height) {
-                        {
-                            let mut c = self.shared.config();
-                            c.width = w;
-                            c.height = h;
-                        }
-                        if let Some(l) = &self.layer {
-                            l.set_size(w, h);
-                            l.commit();
-                        }
-                    }
+            PointerEventKind::Release { button: BTN_LEFT, .. } => match self.drag.take() {
+                Some(d) if d.moved => self.snap(d.pos),
+                Some(_) => {
+                    // A click without dragging locks the overlay.
+                    self.shared.editing.store(false, Ordering::Relaxed);
+                    self.shared.repaint();
                 }
                 None => {}
             },
-            PointerEventKind::Release { button: BTN_LEFT, .. } => {
-                if self.drag.take().is_some() {
-                    self.shared.update_config(|_| ()); // persist
-                }
-            }
             _ => {}
         }
     }
@@ -352,7 +421,11 @@ impl CompositorHandler for App {
             self.draw(qh);
         }
     }
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
+        if let Some(size) = self.output_state.info(output).and_then(|i| i.logical_size) {
+            self.output_size = Some(size);
+        }
+    }
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
 

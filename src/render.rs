@@ -1,12 +1,12 @@
 //! Software rendering of the overlay into a tiny-skia pixmap.
 //! Everything is laid out in logical pixels and scaled by the output scale at draw time.
 
-use crate::config::Config;
+use crate::config::{Config, Edge};
 use crate::state::{Member, Status, Voice};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tiny_skia::{
-    Color, FillRule, FilterQuality, IntSize, Paint, Path, PathBuilder, Pattern, Pixmap, Rect, SpreadMode, Stroke,
+    Color, FillRule, FilterQuality, IntSize, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Stroke,
     Transform,
 };
 
@@ -21,21 +21,71 @@ const TEXT: [u8; 4] = [215, 215, 220, 255];
 const TEXT_SPEAKING: [u8; 4] = [255, 255, 255, 255];
 const GAP: f32 = 6.0;
 
-/// Clickable areas from the last draw, in logical pixels.
-#[derive(Default, Clone, Copy)]
-pub struct Hits {
-    pub done: Option<Rect>,
-    pub grip: Option<Rect>,
-}
-
-pub fn contains(r: Option<Rect>, x: f32, y: f32) -> bool {
-    r.is_some_and(|r| x >= r.left() && x <= r.right() && y >= r.top() && y <= r.bottom())
-}
+const NAME_MAX: f32 = 170.0;
+const STATUS_MAX: f32 = 260.0;
+const STATUS_FONT: f32 = 12.0;
 
 pub struct Painter {
     font: fontdue::Font,
     glyphs: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     pub avatars: Avatars,
+}
+
+/// One thing in the list.
+enum Item {
+    Status(String),
+    Person(Member),
+    /// "+N" for people beyond the max-entries limit.
+    More(usize),
+}
+
+/// What to show, in order.
+fn items(voice: &Voice, cfg: &Config, editing: bool) -> Vec<Item> {
+    let mut out = Vec::new();
+
+    let status = if editing {
+        Some("Drag to an edge · click to lock".to_string())
+    } else {
+        match &voice.status {
+            Status::Authorizing => Some("Click Authorize in Discord".to_string()),
+            Status::Error(e) => Some(e.clone()),
+            Status::Connected if cfg.show_channel => voice.channel_name.clone(),
+            _ => None,
+        }
+    };
+
+    let people: Vec<Member> = if editing && voice.members.is_empty() {
+        sample_members()
+    } else {
+        voice.members.iter().filter(|m| editing || !cfg.only_speaking || m.speaking).cloned().collect()
+    };
+    // A channel name with nobody to show under it is just noise.
+    if let Some(s) = status {
+        if editing || !people.is_empty() || !matches!(voice.status, Status::Connected) {
+            out.push(Item::Status(s));
+        }
+    }
+
+    let max = if cfg.max_entries == 0 { usize::MAX } else { cfg.max_entries as usize };
+    if people.len() <= max {
+        out.extend(people.into_iter().map(Item::Person));
+    } else {
+        // Over the limit: keep whoever is talking, fill up with the rest, keep join order.
+        let mut keep = vec![false; people.len()];
+        let mut n = 0;
+        for pass_speaking in [true, false] {
+            for (i, m) in people.iter().enumerate() {
+                if n < max && !keep[i] && m.speaking == pass_speaking {
+                    keep[i] = true;
+                    n += 1;
+                }
+            }
+        }
+        let hidden = people.len() - n;
+        out.extend(people.into_iter().zip(keep).filter(|(_, k)| *k).map(|(m, _)| Item::Person(m)));
+        out.push(Item::More(hidden));
+    }
+    out
 }
 
 impl Painter {
@@ -44,12 +94,54 @@ impl Painter {
         Self { font, glyphs: HashMap::new(), avatars: Avatars::new(wake) }
     }
 
-    pub fn draw(&mut self, pm: &mut Pixmap, scale: f32, voice: &Voice, cfg: &Config, editing: bool) -> Hits {
+    fn name_font(cfg: &Config) -> f32 {
+        (cfg.avatar_size * 0.42).clamp(12.0, 20.0)
+    }
+
+    fn pill_h(font: f32) -> f32 {
+        font * 1.45 + 4.0
+    }
+
+    /// Logical size of one item.
+    fn item_size(&mut self, item: &Item, cfg: &Config) -> (f32, f32) {
+        let nf = Self::name_font(cfg);
+        match item {
+            Item::Status(t) => (self.pill_w(t, STATUS_FONT, STATUS_MAX), Self::pill_h(STATUS_FONT)),
+            Item::More(n) => (self.pill_w(&format!("+{n}"), nf, NAME_MAX), Self::pill_h(nf)),
+            Item::Person(m) => {
+                let name_w = if cfg.show_names { GAP + self.pill_w(&m.name, nf, NAME_MAX) } else { 0.0 };
+                (cfg.avatar_size + name_w, cfg.avatar_size)
+            }
+        }
+    }
+
+    /// Surface size (logical pixels) needed to show the current state on `cfg.edge`.
+    pub fn measure(&mut self, voice: &Voice, cfg: &Config, editing: bool) -> (u32, u32) {
+        let items = items(voice, cfg, editing);
+        if items.is_empty() {
+            return (1, 1);
+        }
+        let sizes: Vec<(f32, f32)> = items.iter().map(|i| self.item_size(i, cfg)).collect();
+        let n = sizes.len() as f32;
+        let (w, h) = if cfg.edge.is_horizontal() {
+            (
+                sizes.iter().map(|s| s.0).sum::<f32>() + GAP * (n + 1.0),
+                sizes.iter().map(|s| s.1).fold(0.0, f32::max) + 2.0 * GAP,
+            )
+        } else {
+            (
+                sizes.iter().map(|s| s.0).fold(0.0, f32::max) + 2.0 * GAP,
+                sizes.iter().map(|s| s.1).sum::<f32>() + GAP * (n + 1.0),
+            )
+        };
+        (w.ceil() as u32, h.ceil() as u32)
+    }
+
+    pub fn draw(&mut self, pm: &mut Pixmap, scale: f32, voice: &Voice, cfg: &Config, editing: bool) {
         pm.fill(Color::TRANSPARENT);
         let ts = Transform::from_scale(scale, scale);
         let w = pm.width() as f32 / scale;
         let h = pm.height() as f32 / scale;
-        let mut hits = Hits::default();
 
         if editing {
             if let Some(p) = rounded_rect(1.0, 1.0, w - 2.0, h - 2.0, 8.0) {
@@ -58,65 +150,42 @@ impl Painter {
             }
         }
 
-        let status = match &voice.status {
-            Status::NoDiscord => Some("Waiting for Discord…".to_string()),
-            Status::Authorizing => Some("Click Authorize in Discord".to_string()),
-            Status::Error(e) => Some(e.clone()),
-            Status::Connected => voice.channel_name.clone().or_else(|| Some("Not in voice".into())),
-        };
-        // Outside edit mode, only the login prompt is worth covering the game for.
-        let show_status = editing || matches!(voice.status, Status::Authorizing | Status::Error(_));
-        let mut y = GAP;
-        if let (Some(text), true) = (status, show_status) {
-            y = self.pill_text(pm, scale, GAP, y, &text, 12.0, w - 2.0 * GAP, PILL, TEXT) + GAP;
+        let mirrored = cfg.edge == Edge::Right;
+        let nf = Self::name_font(cfg);
+        let (mut x, mut y) = (GAP, GAP);
+        for item in items(voice, cfg, editing) {
+            let (iw, ih) = self.item_size(&item, cfg);
+            let (ix, iy) = if cfg.edge.is_horizontal() {
+                (x, (h - ih) / 2.0)
+            } else if mirrored {
+                (w - GAP - iw, y)
+            } else {
+                (GAP, y)
+            };
+            match &item {
+                Item::Status(t) => self.pill(pm, scale, ix, iy, t, STATUS_FONT, STATUS_MAX, PILL, TEXT),
+                Item::More(n) => self.pill(pm, scale, ix, iy, &format!("+{n}"), nf, NAME_MAX, PILL, TEXT),
+                Item::Person(m) => {
+                    let size = cfg.avatar_size;
+                    let ax = if mirrored { ix + iw - size } else { ix };
+                    self.avatar(pm, scale, m, ax, iy, size);
+                    if cfg.show_names {
+                        let (bg, fg) = if m.speaking { (PILL_SPEAKING, TEXT_SPEAKING) } else { (PILL, TEXT) };
+                        let px = if mirrored { ix } else { ix + size + GAP };
+                        let py = iy + (size - Self::pill_h(nf)) / 2.0;
+                        self.pill(pm, scale, px, py, &m.name, nf, NAME_MAX, bg, fg);
+                    }
+                }
+            }
+            if cfg.edge.is_horizontal() {
+                x += iw + GAP;
+            } else {
+                y += ih + GAP;
+            }
         }
-
-        let samples;
-        let members: Vec<&Member> = if editing && voice.members.is_empty() {
-            samples = sample_members();
-            samples.iter().collect()
-        } else {
-            voice.members.iter().filter(|m| editing || !cfg.only_speaking || m.speaking).collect()
-        };
-
-        let size = cfg.avatar_size;
-        let bottom_reserved = if editing { 36.0 } else { 0.0 };
-        for m in members {
-            if y + size > h - GAP - bottom_reserved {
-                break;
-            }
-            self.member(pm, scale, m, GAP, y, size, cfg.show_names, w - GAP);
-            y += size + GAP;
-        }
-
-        if editing {
-            // Done button, bottom-left.
-            let b = Rect::from_xywh(GAP + 2.0, h - 32.0, 60.0, 24.0).unwrap();
-            if let Some(p) = rounded_rect(b.x(), b.y(), b.width(), b.height(), 5.0) {
-                pm.fill_path(&p, &paint(ACCENT), FillRule::Winding, ts, None);
-            }
-            let tw = self.text_width("Done", 13.0 * scale) / scale;
-            self.text(pm, scale, b.x() + (b.width() - tw) / 2.0, b.y() + 17.0, "Done", 13.0, TEXT_SPEAKING);
-            self.text(pm, scale, b.right() + GAP, b.y() + 16.0, "drag to move", 11.0, [190, 190, 195, 255]);
-            hits.done = Some(b);
-
-            // Resize grip, bottom-right.
-            let mut pb = PathBuilder::new();
-            for i in 0..3 {
-                let o = 5.0 + i as f32 * 5.0;
-                pb.move_to(w - o, h - 4.0);
-                pb.line_to(w - 4.0, h - o);
-            }
-            if let Some(p) = pb.finish() {
-                pm.stroke_path(&p, &paint(ACCENT), &Stroke { width: 1.5, ..Default::default() }, ts, None);
-            }
-            hits.grip = Rect::from_xywh(w - 24.0, h - 24.0, 24.0, 24.0);
-        }
-        hits
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn member(&mut self, pm: &mut Pixmap, scale: f32, m: &Member, x: f32, y: f32, size: f32, names: bool, right: f32) {
+    fn avatar(&mut self, pm: &mut Pixmap, scale: f32, m: &Member, x: f32, y: f32, size: f32) {
         let ts = Transform::from_scale(scale, scale);
         let r = size / 2.0;
         let (cx, cy) = (x + r, y + r);
@@ -125,7 +194,8 @@ impl Painter {
         pm.fill_path(&circle, &paint([40, 40, 44, 230]), FillRule::Winding, ts, None);
         if let Some(img) = self.avatars.get(&m.avatar_url) {
             let opacity = if m.speaking { 1.0 } else { 0.8 };
-            let shader_ts = Transform::from_scale(size / img.width() as f32, size / img.height() as f32).post_translate(x, y);
+            let shader_ts =
+                Transform::from_scale(size / img.width() as f32, size / img.height() as f32).post_translate(x, y);
             let mut p = Paint::default();
             p.anti_alias = true;
             p.shader = Pattern::new(img.as_ref().as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, opacity, shader_ts);
@@ -155,41 +225,27 @@ impl Painter {
                 pm.stroke_path(&p, &paint([255; 4]), &Stroke { width: 1.6, ..Default::default() }, ts, None);
             }
         }
-
-        if names {
-            let font = (size * 0.42).clamp(12.0, 20.0);
-            let (bg, fg) = if m.speaking { (PILL_SPEAKING, TEXT_SPEAKING) } else { (PILL, TEXT) };
-            let tx = x + size + GAP;
-            let line_h = font * 1.45;
-            self.pill_text(pm, scale, tx, cy - line_h / 2.0 - 1.0, &m.name, font, right - tx, bg, fg);
-        }
     }
 
-    /// Draws text on a rounded pill; returns the pill's bottom y.
+    /// Width of a pill holding `text` (truncated to fit `max_w`).
+    fn pill_w(&mut self, text: &str, font: f32, max_w: f32) -> f32 {
+        let t = self.truncate(text, font, max_w - 16.0);
+        self.text_width(&t, font) + 16.0
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn pill_text(
-        &mut self,
-        pm: &mut Pixmap,
-        scale: f32,
-        x: f32,
-        y: f32,
-        text: &str,
-        font: f32,
-        max_w: f32,
-        bg: [u8; 4],
-        fg: [u8; 4],
-    ) -> f32 {
-        let pad = 8.0;
-        let text = self.truncate(text, font * scale, (max_w - 2.0 * pad) * scale);
-        let tw = self.text_width(&text, font * scale) / scale;
-        let line_h = font * 1.45;
-        let h = line_h + 4.0;
-        if let Some(p) = rounded_rect(x, y, tw + 2.0 * pad, h, 4.0) {
+    fn pill(&mut self, pm: &mut Pixmap, scale: f32, x: f32, y: f32, text: &str, font: f32, max_w: f32, bg: [u8; 4], fg: [u8; 4]) {
+        let text = self.truncate(text, font, max_w - 16.0);
+        let w = self.text_width(&text, font) + 16.0;
+        let h = Self::pill_h(font);
+        if let Some(p) = rounded_rect(x, y, w, h, 4.0) {
             pm.fill_path(&p, &paint(bg), FillRule::Winding, Transform::from_scale(scale, scale), None);
         }
-        let ascent = self.font.horizontal_line_metrics(font).map_or(font, |m| m.ascent);
-        self.text(pm, scale, x + pad, y + 2.0 + (line_h - font * 1.36) / 2.0 + ascent, &text, font, fg);
-        y + h
+        let m = self.font.horizontal_line_metrics(font);
+        let (asc, desc) = m.map_or((font, 0.0), |m| (m.ascent, m.descent));
+        // Center the ascent..descent box vertically in the pill.
+        let baseline = y + (h - (asc - desc)) / 2.0 + asc;
+        self.text(pm, scale, x + 8.0, baseline, &text, font, fg);
     }
 
     fn glyph(&mut self, c: char, px: f32) -> &(fontdue::Metrics, Vec<u8>) {
