@@ -1,9 +1,9 @@
 # vc-overlay
 
 A tiny always-on-top Discord voice overlay for Linux Wayland: avatars of everyone in your
-voice channel, a green ring on whoever is talking, Discord-style crossed-out mic/headphone badges for
-muted/deafened. It sits
-on a screen edge, click-through, above fullscreen games.
+voice channel, a green ring on whoever is talking, and Discord-style crossed-out
+mic/headphone badges for muted/deafened. It sits on a screen edge, click-through, above
+fullscreen games.
 
 - **Left edge:** avatar, then name. **Right edge:** name, then avatar, flush right.
 - **Top / bottom edge:** one horizontal bar.
@@ -18,19 +18,31 @@ on a screen edge, click-through, above fullscreen games.
 
 ## Requirements
 
-- A Wayland compositor with `wlr-layer-shell` (KDE Plasma 6, Sway, Hyprland, …).
-  GNOME doesn't support layer-shell.
+- Linux x86_64 with a Wayland compositor that has `wlr-layer-shell` (KDE Plasma 6, Sway,
+  Hyprland, …). GNOME doesn't support layer-shell.
 - The official Discord desktop client running (the Flatpak works). Vesktop/arRPC don't
   expose voice events.
 
-## Build and run
+## Install
 
 ```sh
-cargo build --release
-./target/release/vc-overlay          # real Discord
-./target/release/vc-overlay --demo   # fake channel, for trying it out
-./target/release/vc-overlay --edit   # start in move/resize mode
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/vc-overlay \
+  https://github.com/darkharasho/vc-overlay/releases/latest/download/vc-overlay-x86_64-linux
+chmod +x ~/.local/bin/vc-overlay
+~/.local/bin/vc-overlay
 ```
+
+1. With Discord open, click **Authorize** when Discord asks.
+2. Right-click the tray icon and tick **Start at login**.
+
+That's it: it starts with your session and updates itself (see [Updates](#updates)).
+Each release also has a tarball with the binary, README and license, plus SHA-256
+checksums, on the [releases page](https://github.com/darkharasho/vc-overlay/releases).
+
+To uninstall, untick **Start at login** (or delete
+`~/.config/autostart/vc-overlay.desktop`), quit from the tray, and remove
+`~/.local/bin/vc-overlay` and `~/.config/vc-overlay/`.
 
 ## Using it
 
@@ -45,16 +57,6 @@ cargo build --release
 Settings live in `~/.config/vc-overlay/config.json`; `gap` (distance from the edge) is
 only editable there.
 
-### Start with your session
-
-Install the binary somewhere stable, run it from there, and tick **Start at login** in the
-tray menu. That writes `~/.config/autostart/vc-overlay.desktop` pointing at the running
-binary.
-
-```sh
-install -Dm755 target/release/vc-overlay ~/.local/bin/vc-overlay
-```
-
 ## Updates
 
 Releases come from GitHub. Every 6 hours vc-overlay checks for a newer release,
@@ -62,6 +64,19 @@ downloads it, verifies its SHA-256 and replaces its own binary. If you're not in
 channel it restarts straight away; otherwise the tray shows *Restart to update*. Turn this
 off with *Install updates automatically* in the tray menu. Builds run from `target/`
 never update themselves.
+
+## Build from source
+
+```sh
+cargo build --release
+./target/release/vc-overlay          # real Discord
+./target/release/vc-overlay --demo   # fake channel, for trying it out
+./target/release/vc-overlay --edit   # start in move mode
+install -Dm755 target/release/vc-overlay ~/.local/bin/vc-overlay
+```
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag matching the
+`Cargo.toml` version is pushed.
 
 ## Notes
 
