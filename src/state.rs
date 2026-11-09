@@ -1,6 +1,12 @@
 use crate::config::Config;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How long a join/leave notice stays up.
+pub const NOTICE_TTL: Duration = Duration::from_secs(4);
+/// Most notices shown at once; older ones are dropped first.
+const MAX_NOTICES: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -22,6 +28,14 @@ pub struct Member {
     pub speaking: bool,
 }
 
+/// A brief "X joined" / "X left" line.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub name: String,
+    pub joined: bool,
+    pub until: Instant,
+}
+
 /// Progress of the self-updater, shown in the tray.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UpdateState {
@@ -39,11 +53,21 @@ pub struct Voice {
     pub channel_name: Option<String>,
     /// Members of the current voice channel, in join order.
     pub members: Vec<Member>,
+    /// Recent joins/leaves, oldest first.
+    pub notices: Vec<Notice>,
 }
 
 impl Default for Voice {
     fn default() -> Self {
-        Self { status: Status::NoDiscord, channel_name: None, members: Vec::new() }
+        Self { status: Status::NoDiscord, channel_name: None, members: Vec::new(), notices: Vec::new() }
+    }
+}
+
+impl Voice {
+    /// Notices that haven't expired yet.
+    pub fn live_notices(&self) -> impl Iterator<Item = &Notice> {
+        let now = Instant::now();
+        self.notices.iter().filter(move |n| n.until > now)
     }
 }
 
@@ -116,6 +140,29 @@ impl Shared {
         };
         snapshot.save();
         self.repaint();
+    }
+
+    /// Show "`name` joined/left" for a few seconds, if the user has notices on.
+    pub fn push_notice(self: &std::sync::Arc<Self>, name: String, joined: bool) {
+        if !self.config().join_notices {
+            return;
+        }
+        self.update_voice(|v| {
+            let now = Instant::now();
+            v.notices.retain(|n| n.until > now);
+            v.notices.push(Notice { name, joined, until: now + NOTICE_TTL });
+            let extra = v.notices.len().saturating_sub(MAX_NOTICES);
+            v.notices.drain(..extra);
+        });
+        // Redraw once it has expired so it disappears.
+        let shared = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(NOTICE_TTL + Duration::from_millis(50));
+            shared.update_voice(|v| {
+                let now = Instant::now();
+                v.notices.retain(|n| n.until > now);
+            });
+        });
     }
 
     pub fn update_state(&self) -> UpdateState {

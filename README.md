@@ -2,7 +2,8 @@
 
 A tiny always-on-top Discord voice overlay for Linux Wayland: avatars of everyone in your
 voice channel, a green ring on whoever is talking, and Discord-style crossed-out
-mic/headphone badges for muted/deafened. It sits on a screen edge, click-through, above
+mic/headphone badges for muted/deafened. A short "Name joined" / "Name left" note pops up for
+a few seconds when someone comes or goes. It sits on a screen edge, click-through, above
 fullscreen games.
 
 - **Left edge:** avatar, then name. **Right edge:** name, then avatar, flush right.
@@ -59,7 +60,7 @@ rm -rf ~/.local/bin/vc-overlay ~/.config/vc-overlay \
   that edge it was. Click it without dragging to lock. While locked, clicks go straight
   through to the game.
 - **Right-click the tray icon** for settings: only show who's talking, show names, show
-  channel name, screen edge, max people (extras collapse into "+N", talkers kept
+  channel name, show who joins and leaves, screen edge, max people (extras collapse into "+N", talkers kept
   visible), avatar size, monitor, start at login, updates, re-authorize, quit.
 
 Settings live in `~/.config/vc-overlay/config.json`; `gap` (distance from the edge) is

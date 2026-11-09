@@ -44,6 +44,8 @@ pub struct Config {
     pub show_names: bool,
     /// Show the voice channel name above/before the list.
     pub show_channel: bool,
+    /// Briefly show who joined or left the channel.
+    pub join_notices: bool,
     /// Most people listed at once; the rest collapse into "+N". 0 = no limit.
     pub max_entries: u32,
     /// Avatar diameter in logical pixels.
@@ -64,6 +66,7 @@ impl Default for Config {
             only_speaking: false,
             show_names: true,
             show_channel: false,
+            join_notices: true,
             max_entries: 8,
             avatar_size: 32.0,
             auto_update: true,

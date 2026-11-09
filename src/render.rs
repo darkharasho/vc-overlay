@@ -20,6 +20,11 @@ const PILL: [u8; 4] = [17, 18, 20, 200];
 const PILL_SPEAKING: [u8; 4] = [20, 22, 24, 235];
 const TEXT: [u8; 4] = [215, 215, 220, 255];
 const TEXT_SPEAKING: [u8; 4] = [255, 255, 255, 255];
+const TEXT_DIM: [u8; 4] = [150, 150, 158, 255];
+const LEFT_DOT: [u8; 4] = [128, 132, 142, 255];
+/// Notice pill: dot diameter and the space after it.
+const DOT: f32 = 7.0;
+const DOT_GAP: f32 = 6.0;
 const GAP: f32 = 6.0;
 
 const NAME_MAX: f32 = 170.0;
@@ -35,6 +40,8 @@ pub struct Painter {
 /// One thing in the list.
 enum Item {
     Status(String),
+    /// "Name joined" (true) or "Name left" (false).
+    Notice(String, bool),
     Person(Member),
     /// "+N" for people beyond the max-entries limit.
     More(usize),
@@ -65,6 +72,10 @@ fn items(voice: &Voice, cfg: &Config, editing: bool) -> Vec<Item> {
         if editing || !people.is_empty() || !matches!(voice.status, Status::Connected) {
             out.push(Item::Status(s));
         }
+    }
+
+    if !editing {
+        out.extend(voice.live_notices().map(|n| Item::Notice(n.name.clone(), n.joined)));
     }
 
     let max = if cfg.max_entries == 0 { usize::MAX } else { cfg.max_entries as usize };
@@ -109,6 +120,10 @@ impl Painter {
         match item {
             Item::Status(t) => (self.pill_w(t, STATUS_FONT, STATUS_MAX), Self::pill_h(STATUS_FONT)),
             Item::More(n) => (self.pill_w(&format!("+{n}"), nf, NAME_MAX), Self::pill_h(nf)),
+            Item::Notice(name, joined) => {
+                let text = self.notice_text(name, *joined, nf);
+                (DOT + DOT_GAP + self.text_width(&text, nf) + 16.0, Self::pill_h(nf))
+            }
             Item::Person(m) => {
                 let name_w = if cfg.show_names { GAP + self.pill_w(&m.name, nf, NAME_MAX) } else { 0.0 };
                 (cfg.avatar_size + name_w, cfg.avatar_size)
@@ -166,6 +181,7 @@ impl Painter {
             match &item {
                 Item::Status(t) => self.pill(pm, scale, ix, iy, t, STATUS_FONT, STATUS_MAX, PILL, TEXT),
                 Item::More(n) => self.pill(pm, scale, ix, iy, &format!("+{n}"), nf, NAME_MAX, PILL, TEXT),
+                Item::Notice(name, joined) => self.notice(pm, scale, ix, iy, iw, name, *joined, nf),
                 Item::Person(m) => {
                     let size = cfg.avatar_size;
                     let ax = if mirrored { ix + iw - size } else { ix };
@@ -219,6 +235,31 @@ impl Painter {
             let icon = if m.deafened { Icon::Deafened } else { Icon::Muted };
             draw_icon(pm, ts, icon, bx, by, br * 1.5, MUTED);
         }
+    }
+
+    /// "Name joined" / "Name left", with only the name truncated.
+    fn notice_text(&mut self, name: &str, joined: bool, font: f32) -> String {
+        let verb = if joined { " joined" } else { " left" };
+        let room = NAME_MAX - 16.0 - self.text_width(verb, font);
+        format!("{}{verb}", self.truncate(name, font, room))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn notice(&mut self, pm: &mut Pixmap, scale: f32, x: f32, y: f32, w: f32, name: &str, joined: bool, font: f32) {
+        let ts = Transform::from_scale(scale, scale);
+        let h = Self::pill_h(font);
+        if let Some(p) = rounded_rect(x, y, w, h, 4.0) {
+            pm.fill_path(&p, &paint(PILL_SPEAKING), FillRule::Winding, ts, None);
+        }
+        let (dot, fg) = if joined { (SPEAKING, TEXT_SPEAKING) } else { (LEFT_DOT, TEXT_DIM) };
+        if let Some(c) = PathBuilder::from_circle(x + 8.0 + DOT / 2.0, y + h / 2.0, DOT / 2.0) {
+            pm.fill_path(&c, &paint(dot), FillRule::Winding, ts, None);
+        }
+        let text = self.notice_text(name, joined, font);
+        let m = self.font.horizontal_line_metrics(font);
+        let (asc, desc) = m.map_or((font, 0.0), |m| (m.ascent, m.descent));
+        let baseline = y + (h - (asc - desc)) / 2.0 + asc;
+        self.text(pm, scale, x + 8.0 + DOT + DOT_GAP, baseline, &text, font, fg);
     }
 
     /// Width of a pill holding `text` (truncated to fit `max_w`).
@@ -469,4 +510,43 @@ fn fetch(url: &str) -> Result<Pixmap, String> {
     }
     let size = IntSize::from_wh(w, h).ok_or("empty image")?;
     Pixmap::from_vec(data, size).ok_or_else(|| "bad image size".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Notice;
+    use std::time::{Duration, Instant};
+
+    fn voice_with_notices() -> Voice {
+        let now = Instant::now();
+        let notice = |name: &str, joined, until| Notice { name: name.into(), joined, until };
+        Voice {
+            status: Status::Connected,
+            notices: vec![
+                notice("Night", true, now + Duration::from_secs(3)),
+                notice("Prismatic", false, now + Duration::from_secs(3)),
+                notice("Expired", true, now - Duration::from_secs(1)),
+            ],
+            ..Voice::default()
+        }
+    }
+
+    #[test]
+    fn shows_live_notices_only() {
+        let notices: Vec<(String, bool)> = items(&voice_with_notices(), &Config::default(), false)
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Notice(n, j) => Some((n, j)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices, vec![("Night".into(), true), ("Prismatic".into(), false)]);
+    }
+
+    #[test]
+    fn no_notices_while_editing() {
+        let shown = items(&voice_with_notices(), &Config::default(), true);
+        assert!(!shown.iter().any(|i| matches!(i, Item::Notice(..))));
+    }
 }

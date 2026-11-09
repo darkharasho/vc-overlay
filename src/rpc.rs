@@ -117,13 +117,15 @@ struct Session {
     shared: Arc<Shared>,
     nonce: u64,
     channel_id: Option<String>,
+    /// Our own Discord user id, so we don't announce ourselves.
+    user_id: Option<String>,
     /// Channel switch seen while busy; `Some(None)` means "left voice".
     pending_switch: Option<Option<String>>,
 }
 
 impl Session {
     fn new(ws: Ws, shared: Arc<Shared>) -> Self {
-        Self { ws, shared, nonce: 0, channel_id: None, pending_switch: None }
+        Self { ws, shared, nonce: 0, channel_id: None, user_id: None, pending_switch: None }
     }
 
     fn run(&mut self) -> Result<(), RpcErr> {
@@ -171,7 +173,10 @@ impl Session {
         let saved = self.shared.config().token.clone();
         if let Some(token) = saved {
             match self.call("AUTHENTICATE", json!({ "access_token": token }), None) {
-                Ok(_) => return Ok(()),
+                Ok(data) => {
+                    self.user_id = data["user"]["id"].as_str().map(String::from);
+                    return Ok(());
+                }
                 Err(RpcErr::Command(_)) => self.shared.update_config(|c| c.token = None),
                 Err(e) => return Err(e),
             }
@@ -192,7 +197,7 @@ impl Session {
             .ok_or_else(|| RpcErr::Fatal("AUTHORIZE returned no code".into()))?;
         let token = exchange_code(code).map_err(RpcErr::Fatal)?;
         match self.call("AUTHENTICATE", json!({ "access_token": token }), None) {
-            Ok(_) => {}
+            Ok(data) => self.user_id = data["user"]["id"].as_str().map(String::from),
             Err(RpcErr::Command(e)) => return Err(RpcErr::Fatal(e)),
             Err(e) => return Err(e),
         }
@@ -215,6 +220,7 @@ impl Session {
         self.shared.update_voice(|v| {
             v.channel_name = name;
             v.members = members;
+            v.notices.clear();
         });
 
         if let Some(id) = channel["id"].as_str().map(String::from) {
@@ -296,15 +302,29 @@ impl Session {
             }
             "VOICE_STATE_CREATE" | "VOICE_STATE_UPDATE" => {
                 if let Some(m) = parse_member(data) {
+                    let mut joined = None;
                     self.shared.update_voice(|v| match v.members.iter_mut().find(|x| x.id == m.id) {
                         Some(existing) => *existing = Member { speaking: existing.speaking, ..m },
-                        None => v.members.push(m),
+                        None => {
+                            joined = Some(m.name.clone());
+                            v.members.push(m);
+                        }
                     });
+                    if let Some(name) = joined.filter(|_| evt == "VOICE_STATE_CREATE" && !self.is_me(data)) {
+                        self.shared.push_notice(name, true);
+                    }
                 }
             }
             "VOICE_STATE_DELETE" => {
                 if let Some(id) = data["user"]["id"].as_str() {
-                    self.shared.update_voice(|v| v.members.retain(|m| m.id != id));
+                    let mut left = None;
+                    self.shared.update_voice(|v| {
+                        left = v.members.iter().find(|m| m.id == id).map(|m| m.name.clone());
+                        v.members.retain(|m| m.id != id);
+                    });
+                    if let Some(name) = left.filter(|_| !self.is_me(data)) {
+                        self.shared.push_notice(name, false);
+                    }
                 }
             }
             "SPEAKING_START" | "SPEAKING_STOP" => {
@@ -319,6 +339,12 @@ impl Session {
             }
             _ => {}
         }
+    }
+}
+
+impl Session {
+    fn is_me(&self, voice_state: &Value) -> bool {
+        self.user_id.is_some() && voice_state["user"]["id"].as_str() == self.user_id.as_deref()
     }
 }
 

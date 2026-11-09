@@ -76,6 +76,13 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
+            CheckmarkItem {
+                label: "Show who joins and leaves".into(),
+                checked: cfg.join_notices,
+                activate: Box::new(|t: &mut Self| t.shared.update_config(|c| c.join_notices = !c.join_notices)),
+                ..Default::default()
+            }
+            .into(),
             choice(
                 "Screen edge",
                 &Edge::ALL.map(|e| (e.label(), e)),
