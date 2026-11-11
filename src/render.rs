@@ -33,6 +33,7 @@ const STATUS_FONT: f32 = 12.0;
 
 pub struct Painter {
     font: fontdue::Font,
+    fonts: Fonts,
     glyphs: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     pub avatars: Avatars,
 }
@@ -103,7 +104,7 @@ fn items(voice: &Voice, cfg: &Config, editing: bool) -> Vec<Item> {
 impl Painter {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let font = fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default()).expect("bundled font");
-        Self { font, glyphs: HashMap::new(), avatars: Avatars::new(wake) }
+        Self { font, fonts: Fonts::default(), glyphs: HashMap::new(), avatars: Avatars::new(wake) }
     }
 
     fn name_font(cfg: &Config) -> f32 {
@@ -285,8 +286,21 @@ impl Painter {
 
     fn glyph(&mut self, c: char, px: f32) -> &(fontdue::Metrics, Vec<u8>) {
         let key = (c, (px * 4.0) as u32);
-        let font = &self.font;
-        self.glyphs.entry(key).or_insert_with(|| font.rasterize(c, px))
+        if !self.glyphs.contains_key(&key) {
+            let g = if self.font.has_glyph(c) {
+                self.font.rasterize(c, px)
+            } else if let Some(f) = self.fonts.covering(c) {
+                f.rasterize(c, px)
+            } else if is_invisible(c) {
+                // Variation selectors, joiners etc. with no glyph anywhere: draw nothing
+                // rather than a box.
+                (fontdue::Metrics::default(), Vec::new())
+            } else {
+                self.font.rasterize(c, px)
+            };
+            self.glyphs.insert(key, g);
+        }
+        &self.glyphs[&key]
     }
 
     fn text_width(&mut self, text: &str, px: f32) -> f32 {
@@ -326,6 +340,89 @@ impl Painter {
             pen += m.advance_width;
         }
     }
+}
+
+/// Zero-width formatting characters that shouldn't render as a missing-glyph box.
+fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x200B..=0x200F | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
+}
+
+/// System fonts for characters the bundled font lacks: the "fancy text" Discord users
+/// put in their names (𝓝𝓲𝓰𝓱𝓽, ｆｕｌｌｗｉｄｔｈ, ⓑⓤⓑⓑⓛⓔ…), other scripts, emoji.
+/// Found through fontconfig and loaded on first use.
+#[derive(Default)]
+struct Fonts {
+    loaded: Vec<fontdue::Font>,
+    /// Files already tried (loaded or failed), so each is read at most once.
+    seen: std::collections::HashSet<(String, u32)>,
+    /// Which loaded font draws a character; `None` when nothing does.
+    by_char: HashMap<char, Option<usize>>,
+}
+
+impl Fonts {
+    fn covering(&mut self, c: char) -> Option<&fontdue::Font> {
+        let idx = match self.by_char.get(&c) {
+            Some(i) => *i,
+            None => {
+                let i = self.find(c);
+                self.by_char.insert(c, i);
+                i
+            }
+        };
+        idx.map(|i| &self.loaded[i])
+    }
+
+    fn find(&mut self, c: char) -> Option<usize> {
+        if let Some(i) = self.loaded.iter().position(|f| f.has_glyph(c)) {
+            return Some(i);
+        }
+        for (file, index) in fontconfig_candidates(c) {
+            if !self.seen.insert((file.clone(), index)) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&file) else { continue };
+            let settings = fontdue::FontSettings { collection_index: index, ..Default::default() };
+            let Ok(font) = fontdue::Font::from_bytes(bytes, settings) else { continue };
+            if font.has_glyph(c) {
+                self.loaded.push(font);
+                return Some(self.loaded.len() - 1);
+            }
+        }
+        None
+    }
+}
+
+/// Monochrome scalable font files that have `c`, best first.
+fn fontconfig_candidates(c: char) -> Vec<(String, u32)> {
+    let out = std::process::Command::new("fc-list")
+        .arg(format!(":charset={:x}:color=false:scalable=true", c as u32))
+        .arg("--format=%{file}\t%{index}\t%{family[0]}\n")
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    let mut list: Vec<(u8, String, u32)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let (file, index, family) = (parts.next()?, parts.next()?, parts.next().unwrap_or(""));
+            let ext = file.rsplit('.').next()?.to_ascii_lowercase();
+            if !matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc") {
+                return None;
+            }
+            // Prefer sans faces close to the bundled Open Sans.
+            let rank = if family.starts_with("Noto Sans") {
+                0
+            } else if family.starts_with("DejaVu Sans") || family.starts_with("Noto") {
+                1
+            } else {
+                2
+            };
+            Some((rank, file.to_string(), index.parse().ok()?))
+        })
+        .collect();
+    list.sort();
+    list.into_iter().map(|(_, f, i)| (f, i)).collect()
 }
 
 #[derive(Clone, Copy)]
@@ -542,6 +639,17 @@ mod tests {
             })
             .collect();
         assert_eq!(notices, vec![("Night".into(), true), ("Prismatic".into(), false)]);
+    }
+
+    #[test]
+    fn falls_back_to_system_fonts() {
+        if std::process::Command::new("fc-list").arg("--version").output().is_err() {
+            return; // no fontconfig here
+        }
+        let mut fonts = Fonts::default();
+        // Mathematical bold script N, as used in "fancy" Discord names.
+        assert!(fonts.covering('\u{1D4DD}').is_some());
+        assert!(is_invisible('\u{FE0F}'));
     }
 
     #[test]

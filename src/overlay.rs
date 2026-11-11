@@ -63,7 +63,7 @@ struct App {
     painter: Painter,
 
     layer: Option<LayerSurface>,
-    /// Output name the current surface was created for.
+    /// Output the current surface was actually placed on (`None`: compositor's pick).
     layer_output: Option<String>,
     configured: bool,
     width: u32,
@@ -157,12 +157,10 @@ impl App {
         self.frame_pending = false;
 
         let cfg = self.shared.config().clone();
-        let output = cfg.output.as_ref().and_then(|want| {
-            self.output_state
-                .outputs()
-                .find(|o| self.output_state.info(o).and_then(|i| i.name).as_ref() == Some(want))
-        });
-        self.layer_output = cfg.output.clone();
+        let output = cfg.output.as_ref().and_then(|want| self.find_output(want));
+        // Only record the monitor if it was found: at startup its name may not have
+        // arrived yet, and then the surface is moved once it does.
+        self.layer_output = output.as_ref().and(cfg.output.clone());
 
         self.output_size = output
             .as_ref()
@@ -207,6 +205,24 @@ impl App {
                 layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
                 layer.set_margin(0, 0, gap, off);
             }
+        }
+    }
+
+    fn find_output(&self, name: &str) -> Option<wl_output::WlOutput> {
+        self.output_state
+            .outputs()
+            .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))
+    }
+
+    /// Recreate the surface if it isn't on the configured monitor and that monitor exists
+    /// (or the setting went back to "let the compositor pick").
+    fn ensure_output(&mut self, qh: &QueueHandle<Self>) {
+        let want = self.shared.config().output.clone();
+        if want == self.layer_output {
+            return;
+        }
+        if want.as_deref().is_none_or(|w| self.find_output(w).is_some()) {
+            self.create_layer(qh);
         }
     }
 
@@ -276,10 +292,7 @@ impl App {
             return;
         }
 
-        let want_output = self.shared.config().output.clone();
-        if want_output != self.layer_output {
-            self.create_layer(qh);
-        }
+        self.ensure_output(qh);
 
         let editing = self.shared.is_editing();
         if editing != self.editing {
@@ -329,13 +342,17 @@ impl App {
         let voice = self.shared.voice().clone();
         let cfg = self.shared.config().clone();
 
-        // Size the surface to its content; draw once the compositor confirms the size.
+        // Size the surface to its content. The new size goes out in the same commit as a
+        // buffer drawn at that size: committing the size alone leaves the old buffer up,
+        // and the compositor places it by the new size, so a shrinking surface on the
+        // right/bottom edge would spill onto the neighbouring monitor until the next frame.
         let want = self.painter.measure(&voice, &cfg, self.editing);
-        if want != (self.width, self.height) && want != self.requested {
-            layer.set_size(want.0, want.1);
-            layer.commit();
-            self.requested = want;
-            return;
+        if want != (self.width, self.height) {
+            if want != self.requested {
+                layer.set_size(want.0, want.1);
+                self.requested = want;
+            }
+            (self.width, self.height) = want;
         }
 
         let scale = self.scale.max(1);
@@ -433,11 +450,17 @@ impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+    fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: wl_output::WlOutput) {
         self.refresh_outputs();
+        if self.layer.is_some() {
+            self.ensure_output(qh);
+        }
     }
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+    fn update_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: wl_output::WlOutput) {
         self.refresh_outputs();
+        if self.layer.is_some() {
+            self.ensure_output(qh);
+        }
     }
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
         self.refresh_outputs();
